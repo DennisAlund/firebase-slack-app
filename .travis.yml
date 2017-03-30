@@ -12,6 +12,8 @@ install:
   - tsc
   - cd ..
 script:
+  - sed -i s/{SLACK_ID}/$SLACK_ID/g public/index.html
+
   - firebase use default --token $FIREBASE_DEPLOY_KEY
 
   - firebase functions:config:set slack.id=$SLACK_ID --token $FIREBASE_DEPLOY_KEY
