@@ -4,11 +4,18 @@ import * as rp from "request-promise";
 
 admin.initializeApp(functions.config().firebase);
 
-const SLACK_ACTION_REQUEST_PING = "ping.pong";
-const SLACK_ACTION_RESPONSE_PONG = "pong";
+const SLACK_ACTION_REQUEST_PING = "ping-pong";
+
+// ---------------------------------------------------------------------------------------------------------------------
+//region API ENDPOINT TRIGGERS
+//
 
 //noinspection JSUnusedGlobalSymbols
 export const oauth_redirect = functions.https.onRequest(async (request, response) => {
+    if (request.method !== "GET") {
+        console.error(`Got unsupported ${request.method} request. Expected GET.`);
+        return response.send(405, "Only GET requests are accepted");
+    }
 
     if (!request.query && !request.query.code) {
         return response.status(401).send("Missing query attribute 'code'");
@@ -57,10 +64,8 @@ export const command_ping = functions.https.onRequest(async (request, response) 
         return response.send(401, "Invalid request token!");
     }
 
-    await admin.database().ref("ping").push({
-        team: command.team_id,
-        user: command.user_id
-    });
+    // Handle the commands later, Slack expect this request to return within 3000ms
+    await admin.database().ref("commands/ping").push(command);
 
     return response.contentType("json").status(200).send({
         "response_type": "ephemeral",
@@ -85,8 +90,100 @@ export const message_action = functions.https.onRequest(async (request, response
         return response.send(405, "Only ping pong actions are implemented!");
     }
 
+    // Handle the actions later, Slack expect this request to return within 3000ms
+    await admin.database().ref("actions").push(action);
+
+    // Update the buttons to try and limit the amount of player inputs
+    if (action.actions[0].name.startsWith("1")) {
+        action.original_message.attachments[0].actions[0].style = "primary";
+        action.original_message.attachments[0].actions[0].name = "2.pong";
+    } else if (action.actions[0].name.startsWith("2")) {
+        action.original_message.attachments[0].actions[0].style = "danger";
+        action.original_message.attachments[0].actions[0].name = "3.pong";
+    } else {
+        action.original_message.text = `The current game of PING (id ${action.actions[0].value}) is over!`;
+        action.original_message.attachments[0].actions = [];
+    }
+
+    return response.contentType("json").status(200).send(action.original_message);
+});
+
+//endregion API ENDPOINT TRIGGERS
+
+
+// ---------------------------------------------------------------------------------------------------------------------
+//region DATABASE TRIGGERS
+//
+
+
+//noinspection JSUnusedGlobalSymbols
+export const on_command_ping = functions.database.ref("commands/ping/{id}").onWrite(async (event) => {
+    if (!event.data.exists()) {
+        return "Nothing to do for deletion of processed commands.";
+    }
+
+    // Start by deleting the command itself from the queue
+    await event.data.ref.remove();
+
+    const command = event.data.val() as SlackSlashCommand;
+
+    const installationRef = admin.database().ref("installations").child(command.team_id);
+    const installation = (await installationRef.once("value")).val() as InstallationData;
+
+    const options = {
+        uri: installation.webhook.url,
+        method: "POST",
+        json: true,
+        body: {
+            text: `You are challenged to a game of PING! (id: ${event.params.id})`,
+            attachments: [
+                {
+                    fallback: "No ping pong for you today",
+                    callback_id: SLACK_ACTION_REQUEST_PING,
+                    attachment_type: "default",
+                    actions: [
+                        {
+                            name: "1.pong",
+                            text: "Pong!",
+                            type: "button",
+                            value: event.params.id
+                        }
+                    ]
+                }
+            ]
+        }
+    };
+
+    const ping: Ping = {
+        pinged_at: admin.database.ServerValue.TIMESTAMP,
+        team: command.team_id,
+        user: command.user_id
+    };
+
+    await admin.database().ref("ping").child(event.params.id).set(ping);
+    return rp(options);
+});
+
+//noinspection JSUnusedGlobalSymbols
+export const on_actions = functions.database.ref("actions/{id}").onWrite(async (event) => {
+    if (!event.data.exists()) {
+        return "Nothing to do for deletion of processed commands.";
+    }
+
+    // Start by deleting the action request itself from the queue
+    await event.data.ref.remove();
+
+    const action = event.data.val() as SlackActionInvocation;
+
+    if (action.callback_id !== SLACK_ACTION_REQUEST_PING) {
+        console.error("Only ping pong actions are implemented!");
+        return;
+    }
+
+    const pongId = admin.database().ref("pong").push().key;
     const pingId = action.actions[0].value;
-    const transactionResult = await admin.database().ref("ping").child(pingId).transaction((ping) => {
+    const pingRef = admin.database().ref("ping").child(pingId);
+    const transactionResult = await pingRef.transaction((ping) => {
         if (!ping) {
             return null;
         }
@@ -99,82 +196,88 @@ export const message_action = functions.https.onRequest(async (request, response
 
         ping.pongs = ping.pongs || {};
         // Slack timestamps comes as Unix Epoch in SECONDS with milliseconds in fraction
-        ping.pongs[action.user.id] = Math.round(parseFloat(action.action_ts) * 1000);
+        ping.pongs[pongId] = Math.round(parseFloat(action.action_ts) * 1000);
         return ping;
     });
 
     const committed = transactionResult.committed;
     const ping = transactionResult.snapshot.exists() ? transactionResult.snapshot.val() as Ping : null;
-
-    if (!committed && !ping) {
-        return response.send(404, "There's no PING for Your PONG!?!");
-    }
-
     if (!committed) {
-        return response.send(200, "Too late!!! Try to be quicker next time! :-)");
+        return "Not your luck today";
     }
 
-    const pongTime = ping.pongs[action.user.id];
+    const pongTime = ping.pongs[pongId];
     const pong: Pong = {
         ponged_at: pongTime,
         ping_pong_time: pongTime - ping.pinged_at,
-        user: action.user.id,
+        user_id: action.user.id,
+        user_name: action.user.name,
         team: action.team.id,
         ping: pingId
     };
 
-    await admin.database().ref("pong").push(pong);
-    const pongNumber = Object.keys(ping.pongs).length;
+    await admin.database().ref("pong").child(pongId).set(pong);
 
-    action.original_message.attachments.push({
-        "title": "#" + pongNumber,
-        "text": `@${action.user.name}`
-    });
-    return response.contentType("json").status(200).send(action.original_message);
+    const numberOfPongs = Object.keys(ping.pongs).length;
+    if (numberOfPongs < 3) {
+        return "Waiting for more pongs";
+    }
+
+    return sendPingPongScore(pingId);
 });
 
-//noinspection JSUnusedGlobalSymbols
-export const on_ping = functions.database.ref("ping/{id}").onWrite(async (event) => {
-    if (!event.data.exists()) {
-        return "Nothing to do on delete";
-    }
+//endregion DATABASE TRIGGERS
 
-    const ping = event.data.val() as Ping;
-    if (ping.pinged_at) {
-        return "Nothing to do for further updates.";
-    }
+// ---------------------------------------------------------------------------------------------------------------------
+//region INTERNAL FUNCTIONS
+//
+// Ignore everything below here, it's just definitions for better auto-completion and
+// to help remembering the structure of data
+
+async function sendPingPongScore(pingId: string) {
+    const payload = {attachments: []};
+    const ping = (await admin.database().ref("ping").child(pingId).once("value")).val() as Ping;
+    const snap = await admin.database().ref("pong").orderByChild("ping").equalTo(pingId).limitToFirst(3).once("value");
+
+    const medalColors = ["#C98910", "#A8A8A8", "#965A38"];
+    let counter = 0;
+    snap.forEach((childSnap) => {
+        const pong = childSnap.val() as Pong;
+        const color = medalColors[counter];
+        counter += 1;
+
+        payload.attachments.push({
+            "fallback": "No ping pong scores for you today.",
+            "color": color,
+            "title": `#${counter} <@${pong.user_id}|${pong.user_name}>`,
+            "fields": [
+                {
+                    "title": "Pinged at",
+                    "value": (new Date(pong.ponged_at)).toString(),
+                    "short": true
+                },
+                {
+                    "title": "Response time",
+                    "value": `${pong.ping_pong_time/1000} seconds`,
+                    "short": true
+                }
+            ]
+        });
+
+    });
+
 
     const installationRef = admin.database().ref("installations").child(ping.team);
     const installation = (await installationRef.once("value")).val() as InstallationData;
-
-    const options = {
+    return rp({
         uri: installation.webhook.url,
         method: "POST",
         json: true,
-        body: {
-            text: "PING!!?",
-            attachments: [
-                {
-                    fallback: "No ping pong for you today",
-                    callback_id: SLACK_ACTION_REQUEST_PING,
-                    attachment_type: "default",
-                    actions: [
-                        {
-                            name: SLACK_ACTION_RESPONSE_PONG,
-                            text: "Pong!",
-                            type: "button",
-                            value: event.params.id
-                        }
-                    ]
-                }
-            ]
-        }
-    };
+        body: payload
+    });
+}
 
-    // Set the timestamp as close to the notification as possible
-    await event.data.ref.parent.child("pinged_at").set(admin.database.ServerValue.TIMESTAMP);
-    return rp(options);
-});
+//endregion INTERNAL FUNCTIONS
 
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -187,7 +290,8 @@ interface Pong {
     ponged_at: number,
     ping_pong_time: number,
     team: string,
-    user: string,
+    user_id: string,
+    user_name: string,
     ping: string
 }
 

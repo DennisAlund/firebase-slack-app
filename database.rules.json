@@ -1,6 +1,11 @@
 {
   "rules": {
     ".read": "false",
-    ".write": "false"
+    ".write": "false",
+    "pong": {
+      ".indexOn": [
+        "ping"
+      ]
+    }
   }
 }
