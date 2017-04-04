@@ -12,11 +12,14 @@ install:
   - tsc
   - cd ..
 script:
-  - sed -i s/{SLACK_ID}/$SLACK_ID/g public/index.html
-
+  # Before anything else
   - firebase use default --token $FIREBASE_DEPLOY_KEY
 
+  # Slack configuration
+  - sed -i s/{SLACK_ID}/$SLACK_ID/g public/index.html
   - firebase functions:config:set slack.id=$SLACK_ID --token $FIREBASE_DEPLOY_KEY
   - firebase functions:config:set slack.secret=$SLACK_SECRET --token $FIREBASE_DEPLOY_KEY
+  - firebase functions:config:set slack.token=$SLACK_TOKEN --token $FIREBASE_DEPLOY_KEY
 
+  # Finally deploy
   - firebase deploy -m "Travis build $TRAVIS_BUILD_NUMBER" --non-interactive --token $FIREBASE_DEPLOY_KEY
