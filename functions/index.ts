@@ -14,7 +14,7 @@ const SLACK_ACTION_REQUEST_PING = "ping-pong";
 export const oauth_redirect = functions.https.onRequest(async (request, response) => {
     if (request.method !== "GET") {
         console.error(`Got unsupported ${request.method} request. Expected GET.`);
-        return response.send(405, "Only GET requests are accepted");
+        return response.status(405).send("Only GET requests are accepted");
     }
 
     if (!request.query && !request.query.code) {
@@ -55,13 +55,13 @@ export const oauth_redirect = functions.https.onRequest(async (request, response
 export const command_ping = functions.https.onRequest(async (request, response) => {
     if (request.method !== "POST") {
         console.error(`Got unsupported ${request.method} request. Expected POST.`);
-        return response.send(405, "Only POST requests are accepted");
+        return response.status(405).send("Only POST requests are accepted");
     }
 
     const command = request.body as SlackSlashCommand;
     if (command.token !== functions.config().slack.token) {
         console.error(`Invalid request token ${command.token} from ${command.team_id} (${command.team_domain}.slack.com)`);
-        return response.send(401, "Invalid request token!");
+        return response.status(401).send("Invalid request token!");
     }
 
     // Handle the commands later, Slack expect this request to return within 3000ms
@@ -77,17 +77,17 @@ export const command_ping = functions.https.onRequest(async (request, response) 
 export const message_action = functions.https.onRequest(async (request, response) => {
     if (request.method !== "POST") {
         console.error(`Got unsupported ${request.method} request. Expected POST.`);
-        return response.send(405, "Only POST requests are accepted");
+        return response.status(405).send("Only POST requests are accepted");
     }
 
     if (!request.body && request.body.payload) {
-        return response.send(401, "Bad formatted action response");
+        return response.status(401).send("Bad formatted action response");
     }
 
     const action = JSON.parse(request.body.payload) as SlackActionInvocation;
 
     if (action.callback_id !== SLACK_ACTION_REQUEST_PING) {
-        return response.send(405, "Only ping pong actions are implemented!");
+        return response.status(405).send("Only ping pong actions are implemented!");
     }
 
     // Handle the actions later, Slack expect this request to return within 3000ms
